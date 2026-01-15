@@ -136,6 +136,7 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
     // See <https://docs.rs/sea-query/latest/sea_query/table/enum.ColumnType.html#variants> for more.
     let column_type = match (&f.r#type, f.native_type.as_ref().map(|nt| (nt.0.as_str(), nt.1.as_slice()))) {
       (_, Some(("Timestamptz", _))) => Some("TimestampWithTimeZone".to_string()),
+      (_, Some(("Time", _))) => Some("Time".to_string()),
       (_, Some(("VarChar", [limit]))) => Some(format!("String(StringLen::N({}))", limit)),
       (_, Some(("VarChar", _))) => Some("String(StringLen::None)".to_string()),
       (_, Some(("Char", [limit]))) => Some(format!("Char(Some({}))", limit)),
@@ -305,6 +306,9 @@ fn prisma_field_type(prisma_dmmf_field: &Field) -> TokenStream {
         (FieldType::Bytes, _) => quote! { Vec<u8> },
         (FieldType::DateTime, Some((native_db_type, _))) if native_db_type == "Timestamptz" => {
             quote! { DateTimeWithTimeZone }
+        }
+        (FieldType::DateTime, Some((native_db_type, _))) if native_db_type == "Time" => {
+            quote! { Time }
         }
         (FieldType::DateTime, _) => quote! { DateTime },
         (FieldType::Decimal, _) => quote! { Decimal },
