@@ -2,7 +2,7 @@
 name = "prisma-to-sea-orm-codegen"
 version.workspace = true
 edition.workspace = true
-publish = false
+publish.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
