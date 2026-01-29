@@ -143,6 +143,7 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
       (_, Some(("Char", _))) => Some("Char(None)".to_string()),
       (_, Some(("Text", _))) => Some("Text".to_string()),
       (_, Some(("Uuid", _))) => Some("Uuid".to_string()),
+      (_, Some(("SmallInt", _))) => Some("SmallInteger".to_string()),
       (_, Some((native_db_type, native_db_type_args))) => {
         println!("Warning: column '{column_name}' in the model '{table_name}' has an unknown column type '{native_db_type}({})'. Ignoring this type.", native_db_type_args.join(","));
         None
@@ -313,6 +314,9 @@ fn prisma_field_type(prisma_dmmf_field: &Field) -> TokenStream {
         (FieldType::DateTime, _) => quote! { DateTime },
         (FieldType::Decimal, _) => quote! { Decimal },
         (FieldType::Float, _) => quote! { f64 },
+        (FieldType::Int, Some((native_db_type, _))) if native_db_type == "SmallInt" => {
+            quote! { i16 }
+        }
         (FieldType::Int, _) => quote! { i32 },
         (FieldType::Json, _) => quote! { Json },
         (FieldType::String, Some((native_db_type, _))) if native_db_type == "Uuid" => {
