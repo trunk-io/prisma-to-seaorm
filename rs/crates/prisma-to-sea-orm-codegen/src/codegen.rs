@@ -6,6 +6,121 @@ use syn::{punctuated::Punctuated, token::Comma};
 
 use crate::prisma_dmmf::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueConstraint {
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
+pub fn collect_unique_constraints(model: &Model, indexes: &[Index]) -> Vec<UniqueConstraint> {
+    let mut constraints = Vec::new();
+    let mut seen_constraints = IndexSet::new();
+
+    // Collect from model.unique_fields
+    for unique_fields in &model.unique_fields {
+        if !unique_fields.is_empty() {
+            let constraint_name = unique_fields.join("_");
+            let constraint_key = (constraint_name.clone(), unique_fields.clone());
+
+            if seen_constraints.insert(constraint_key) {
+                constraints.push(UniqueConstraint {
+                    name: constraint_name,
+                    fields: unique_fields.clone(),
+                });
+            }
+        }
+    }
+
+    // Collect from model.unique_indexes
+    for unique_index in &model.unique_indexes {
+        if !unique_index.fields.is_empty() {
+            let constraint_name = unique_index
+                .name
+                .clone()
+                .unwrap_or_else(|| unique_index.fields.join("_"));
+            let constraint_key = (constraint_name.clone(), unique_index.fields.clone());
+
+            if seen_constraints.insert(constraint_key) {
+                constraints.push(UniqueConstraint {
+                    name: constraint_name,
+                    fields: unique_index.fields.clone(),
+                });
+            }
+        }
+    }
+
+    // Collect from indexes where type == IndexType::Unique
+    let unique_indexes = indexes
+        .iter()
+        .filter(|index| index.model == model.name && matches!(index.r#type, IndexType::Unique))
+        .collect::<Vec<_>>();
+
+    for index in unique_indexes {
+        if !index.fields.is_empty() {
+            let constraint_name = index
+                .db_name
+                .clone()
+                .or_else(|| index.name.clone())
+                .unwrap_or_else(|| {
+                    index
+                        .fields
+                        .iter()
+                        .map(|f| f.name.clone())
+                        .collect::<Vec<_>>()
+                        .join("_")
+                });
+
+            let field_names = index
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .collect::<Vec<_>>();
+            let constraint_key = (constraint_name.clone(), field_names.clone());
+
+            if seen_constraints.insert(constraint_key) {
+                constraints.push(UniqueConstraint {
+                    name: constraint_name,
+                    fields: field_names,
+                });
+            }
+        }
+    }
+
+    constraints
+}
+
+fn generate_unique_constraint_struct(
+    constraint: &UniqueConstraint,
+    model: &Model,
+    model_name: &str,
+) -> TokenStream {
+    let struct_name = format_ident!(
+        "{}{}",
+        model_name.to_upper_camel_case(),
+        constraint.name.to_upper_camel_case()
+    );
+
+    let fields = constraint.fields.iter().map(|field_name| {
+        let field = model
+            .fields
+            .iter()
+            .find(|f| f.name == *field_name)
+            .expect("Field must exist");
+        let field_ident = format_ident!("{}", escape_rust_keyword(field_name.to_snake_case()));
+        let field_type = prisma_field_type(field);
+        quote! { pub #field_ident: #field_type }
+    });
+
+    let constraint_name_doc = format!("Unique constraint: {}", constraint.name);
+    quote! {
+        #[doc = #constraint_name_doc]
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct #struct_name {
+            #(#fields,)*
+        }
+    }
+}
+
 fn prisma_enum(prisma_dmmf_datamodel_enum: &DatamodelEnum) -> TokenStream {
     let enum_name = &prisma_dmmf_datamodel_enum
         .db_name
@@ -70,12 +185,29 @@ fn safe_enum_variant_name(value: impl AsRef<str>, warning: impl AsRef<str>) -> I
 pub struct ModelCodegen {
     pub use_declarations: Vec<TokenStream>,
     pub model: TokenStream,
+    pub unique_constraint_structs: Vec<TokenStream>,
 }
 
 fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> ModelCodegen {
     let prisma_dmmf_indexes_for_model = prisma_dmmf_indexes
         .iter()
         .filter(|i| i.model == prisma_dmmf_model.name)
+        .collect::<Vec<_>>();
+
+    // Collect unique constraints
+    let unique_constraints = collect_unique_constraints(
+        prisma_dmmf_model,
+        &prisma_dmmf_indexes_for_model
+            .iter()
+            .map(|idx| (*idx).clone())
+            .collect::<Vec<_>>(),
+    );
+
+    // Generate unique constraint structs (only for compound constraints)
+    let unique_constraint_structs = unique_constraints
+        .iter()
+        .filter(|c| c.fields.len() > 1)
+        .map(|c| generate_unique_constraint_struct(c, prisma_dmmf_model, &prisma_dmmf_model.name))
         .collect::<Vec<_>>();
 
     let table_name = prisma_table_name(prisma_dmmf_model);
@@ -286,6 +418,7 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
             )*
           }
         },
+        unique_constraint_structs,
     }
 }
 
@@ -569,26 +702,48 @@ pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -
         .iter()
         .map(|m| format_ident!("{}", prisma_model_module_name(&m.name)))
         .collect::<Vec<_>>();
-    let (use_declarations, models): (Vec<_>, Vec<_>) = prisma_dmmf_datamodel
+    let model_modules: Vec<_> = prisma_dmmf_datamodel
         .models
         .iter()
-        .map(|m| {
+        .enumerate()
+        .map(|(i, m)| {
             let model_codegen = prisma_model(m, &prisma_dmmf_datamodel.indexes);
-            (model_codegen.use_declarations, model_codegen.model)
-        })
-        .unzip();
-
-    let (relation_enums, related_entity_impls): (Vec<_>, Vec<_>) = prisma_dmmf_datamodel
-        .models
-        .iter()
-        .map(|m| {
             let model_entity_relations = prisma_model_relations(m);
-            (
-                model_entity_relations.relation_enum,
-                model_entity_relations.related_entity_impls,
-            )
+            let module_name = &module_names[i];
+
+            let use_declarations = &model_codegen.use_declarations;
+            let model = &model_codegen.model;
+            let unique_constraint_structs = &model_codegen.unique_constraint_structs;
+            let relation_enum = &model_entity_relations.relation_enum;
+            let related_entity_impls = &model_entity_relations.related_entity_impls;
+
+            quote! {
+                pub mod #module_name {
+                    #![allow(unused)]
+
+                    use sea_orm::entity::prelude::*;
+
+                    #(
+                        #use_declarations
+                    )*
+
+                    #model
+
+                    #(
+                        #unique_constraint_structs
+                    )*
+
+                    #relation_enum
+
+                    #(
+                        #related_entity_impls
+                    )*
+
+                    impl ActiveModelBehavior for ActiveModel {}
+                }
+            }
         })
-        .unzip();
+        .collect();
 
     quote! {
       mod #module_ident {
@@ -608,27 +763,7 @@ pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -
           #(#enums)*
         }
 
-        #(
-          pub mod #module_names {
-            #![allow(unused)]
-
-            use sea_orm::entity::prelude::*;
-
-            #(
-              #use_declarations
-            )*
-
-            #models
-
-            #relation_enums
-
-            #(
-              #related_entity_impls
-            )*
-
-            impl ActiveModelBehavior for ActiveModel {}
-          }
-        )*
+        #(#model_modules)*
       }
     }
 }
