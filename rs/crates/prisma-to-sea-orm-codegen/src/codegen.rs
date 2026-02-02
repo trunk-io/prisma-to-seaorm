@@ -6,102 +6,76 @@ use syn::{punctuated::Punctuated, token::Comma};
 
 use crate::prisma_dmmf::*;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UniqueConstraint {
     pub name: String,
     pub fields: Vec<String>,
 }
 
-pub fn collect_unique_constraints(model: &Model, indexes: &[Index]) -> Vec<UniqueConstraint> {
-    let mut constraints = Vec::new();
-    let mut seen_constraints = IndexSet::new();
-
-    if let Some(primary_key) = &model.primary_key
-        && primary_key.fields.len() > 1
-    {
-        let constraint_name = "primary_key".to_string();
-        let constraint_key = (constraint_name.clone(), primary_key.fields.clone());
-
-        if seen_constraints.insert(constraint_key) {
-            constraints.push(UniqueConstraint {
-                name: constraint_name,
-                fields: primary_key.fields.clone(),
-            });
-        }
-    }
-
-    for unique_fields in &model.unique_fields {
-        if !unique_fields.is_empty() {
-            let constraint_name = unique_fields.join("_");
-            let constraint_key = (constraint_name.clone(), unique_fields.clone());
-
-            if seen_constraints.insert(constraint_key) {
-                constraints.push(UniqueConstraint {
-                    name: constraint_name,
-                    fields: unique_fields.clone(),
-                });
-            }
-        }
-    }
-
-    for unique_index in &model.unique_indexes {
-        if !unique_index.fields.is_empty() {
-            let constraint_name = unique_index
-                .name
-                .clone()
-                .unwrap_or_else(|| unique_index.fields.join("_"));
-            let constraint_key = (constraint_name.clone(), unique_index.fields.clone());
-
-            if seen_constraints.insert(constraint_key) {
-                constraints.push(UniqueConstraint {
-                    name: constraint_name,
-                    fields: unique_index.fields.clone(),
-                });
-            }
-        }
-    }
-
-    let unique_indexes = indexes
+pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet<UniqueConstraint> {
+    let primary_key_constraints = model
+        .primary_key
         .iter()
-        .filter(|index| index.model == model.name && matches!(index.r#type, IndexType::Unique))
-        .collect::<Vec<_>>();
+        .filter(|pk| pk.fields.len() > 1)
+        .map(|pk| UniqueConstraint {
+            name: "primary_key".to_string(),
+            fields: pk.fields.clone(),
+        });
 
-    for index in unique_indexes {
-        if !index.fields.is_empty() {
-            let constraint_name = index
+    let unique_field_constraints = model
+        .unique_fields
+        .iter()
+        .filter(|fields| !fields.is_empty())
+        .map(|fields| UniqueConstraint {
+            name: fields.join("_"),
+            fields: fields.clone(),
+        });
+
+    let unique_index_constraints = model
+        .unique_indexes
+        .iter()
+        .filter(|idx| !idx.fields.is_empty())
+        .map(|idx| UniqueConstraint {
+            name: idx.name.clone().unwrap_or_else(|| idx.fields.join("_")),
+            fields: idx.fields.clone(),
+        });
+
+    let external_unique_constraints = indexes
+        .iter()
+        .filter(|idx| idx.model == model.name && matches!(idx.r#type, IndexType::Unique))
+        .filter(|idx| !idx.fields.is_empty())
+        .map(|idx| {
+            let constraint_name = idx
                 .db_name
                 .clone()
-                .or_else(|| index.name.clone())
+                .or_else(|| idx.name.clone())
                 .unwrap_or_else(|| {
-                    index
-                        .fields
+                    idx.fields
                         .iter()
                         .map(|f| f.name.clone())
                         .collect::<Vec<_>>()
                         .join("_")
                 });
-
-            let field_names = index
+            let field_names = idx
                 .fields
                 .iter()
                 .map(|f| f.name.clone())
                 .collect::<Vec<_>>();
-            let constraint_key = (constraint_name.clone(), field_names.clone());
-
-            if seen_constraints.insert(constraint_key) {
-                constraints.push(UniqueConstraint {
-                    name: constraint_name,
-                    fields: field_names,
-                });
+            UniqueConstraint {
+                name: constraint_name,
+                fields: field_names,
             }
-        }
-    }
+        });
 
-    constraints
+    primary_key_constraints
+        .chain(unique_field_constraints)
+        .chain(unique_index_constraints)
+        .chain(external_unique_constraints)
+        .collect()
 }
 
 fn generate_unique_constraint_enum(
-    unique_constraints: &[UniqueConstraint],
+    unique_constraints: &IndexSet<UniqueConstraint>,
     model: &Model,
 ) -> TokenStream {
     if unique_constraints.is_empty() {
@@ -110,7 +84,7 @@ fn generate_unique_constraint_enum(
 
     let variants = unique_constraints
         .iter()
-        .map(|constraint| {
+        .flat_map(|constraint| {
             let variant_name = format_ident!("{}Constraint", constraint.name.to_upper_camel_case());
 
             let fields = constraint
@@ -133,16 +107,15 @@ fn generate_unique_constraint_enum(
                 .collect::<Vec<_>>();
 
             if fields.is_empty() {
-                return quote! {};
+                return None;
             }
 
-            quote! {
+            Some(quote! {
                 #variant_name {
                     #(#fields,)*
                 }
-            }
+            })
         })
-        .filter(|ts| !ts.is_empty())
         .collect::<Vec<_>>();
 
     if variants.is_empty() {
@@ -158,7 +131,7 @@ fn generate_unique_constraint_enum(
 }
 
 fn generate_entity_ext_trait(
-    unique_constraints: &[UniqueConstraint],
+    unique_constraints: &IndexSet<UniqueConstraint>,
     model: &Model,
 ) -> TokenStream {
     if unique_constraints.is_empty() {
@@ -203,22 +176,14 @@ fn generate_entity_ext_trait(
                                 field.native_type.as_ref().map(|nt| nt.0.as_str()),
                                 field.is_required,
                             ) {
-                                (FieldType::String, Some("Uuid"), true) => {
+                                (FieldType::String, Some("Uuid"), _) => {
                                     quote! { #field_ident }
                                 }
-                                (FieldType::String, Some("Uuid"), false) => {
-                                    quote! { #field_ident }
-                                }
-                                (FieldType::Int, _, true)
-                                | (FieldType::BigInt, _, true)
-                                | (FieldType::Float, _, true)
-                                | (FieldType::Boolean, _, true)
-                                | (FieldType::DateTime, _, true) => quote! { #field_ident },
-                                (FieldType::Int, _, false)
-                                | (FieldType::BigInt, _, false)
-                                | (FieldType::Float, _, false)
-                                | (FieldType::Boolean, _, false)
-                                | (FieldType::DateTime, _, false) => quote! { #field_ident },
+                                (FieldType::Int, _, _)
+                                | (FieldType::BigInt, _, _)
+                                | (FieldType::Float, _, _)
+                                | (FieldType::Boolean, _, _)
+                                | (FieldType::DateTime, _, _) => quote! { #field_ident },
                                 (FieldType::ModelName(_), _, true)
                                     if matches!(field.kind, FieldKind::Enum) =>
                                 {
@@ -353,13 +318,8 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
         .filter(|i| i.model == prisma_dmmf_model.name)
         .collect::<Vec<_>>();
 
-    let unique_constraints = collect_unique_constraints(
-        prisma_dmmf_model,
-        &prisma_dmmf_indexes_for_model
-            .iter()
-            .map(|idx| (*idx).clone())
-            .collect::<Vec<_>>(),
-    );
+    let unique_constraints =
+        collect_unique_constraints(prisma_dmmf_model, &prisma_dmmf_indexes_for_model);
 
     let unique_constraint_enum =
         generate_unique_constraint_enum(&unique_constraints, prisma_dmmf_model);
@@ -862,18 +822,21 @@ pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -
     let model_modules: Vec<_> = prisma_dmmf_datamodel
         .models
         .iter()
-        .enumerate()
-        .map(|(i, m)| {
+        .zip(module_names)
+        .map(|(m, module_name)| {
             let model_codegen = prisma_model(m, &prisma_dmmf_datamodel.indexes);
-            let model_entity_relations = prisma_model_relations(m);
-            let module_name = &module_names[i];
+            let model_entity_relations: ModelEntityRelations = prisma_model_relations(m);
 
-            let use_declarations = &model_codegen.use_declarations;
-            let model = &model_codegen.model;
-            let unique_constraint_enum = &model_codegen.unique_constraint_enum;
-            let entity_ext_trait = &model_codegen.entity_ext_trait;
-            let relation_enum = &model_entity_relations.relation_enum;
-            let related_entity_impls = &model_entity_relations.related_entity_impls;
+            let ModelCodegen {
+                use_declarations,
+                model,
+                unique_constraint_enum,
+                entity_ext_trait,
+            } = &model_codegen;
+            let ModelEntityRelations {
+                relation_enum,
+                related_entity_impls,
+            } = &model_entity_relations;
 
             quote! {
                 pub mod #module_name {
