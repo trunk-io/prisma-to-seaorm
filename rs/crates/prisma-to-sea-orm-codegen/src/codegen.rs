@@ -89,27 +89,55 @@ pub fn collect_unique_constraints(model: &Model, indexes: &[Index]) -> Vec<Uniqu
     constraints
 }
 
+fn format_unique_constraint_struct_name(
+    model_name: &str,
+    constraint_name: &str,
+) -> proc_macro2::Ident {
+    let base_name = format!(
+        "{}{}UniqueConstraint",
+        model_name.to_upper_camel_case(),
+        constraint_name.to_upper_camel_case()
+    );
+
+    // Ensure the name doesn't conflict with Rust keywords
+    let safe_name = escape_rust_keyword(base_name);
+    format_ident!("{}", safe_name)
+}
+
 fn generate_unique_constraint_struct(
     constraint: &UniqueConstraint,
     model: &Model,
     model_name: &str,
 ) -> TokenStream {
-    let struct_name = format_ident!(
-        "{}{}",
-        model_name.to_upper_camel_case(),
-        constraint.name.to_upper_camel_case()
-    );
+    // Generate structs for all constraints (including single-field)
 
-    let fields = constraint.fields.iter().map(|field_name| {
-        let field = model
-            .fields
-            .iter()
-            .find(|f| f.name == *field_name)
-            .expect("Field must exist");
-        let field_ident = format_ident!("{}", escape_rust_keyword(field_name.to_snake_case()));
-        let field_type = prisma_field_type(field);
-        quote! { pub #field_ident: #field_type }
-    });
+    // Generate safe struct name to avoid conflicts
+    let struct_name = format_unique_constraint_struct_name(model_name, &constraint.name);
+
+    // Collect fields with proper type handling
+    let fields = constraint
+        .fields
+        .iter()
+        .filter_map(|field_name| {
+            model
+                .fields
+                .iter()
+                .find(|f| f.name == *field_name)
+                .map(|field| {
+                    // Use escape_rust_keyword for field names
+                    let field_ident =
+                        format_ident!("{}", escape_rust_keyword(&field.name.to_snake_case()));
+                    // Get proper field type (handles nullable fields, enums, etc.)
+                    let field_type = prisma_field_type(field);
+                    quote! { pub #field_ident: #field_type }
+                })
+        })
+        .collect::<Vec<_>>();
+
+    // Only generate if we have fields (avoid empty structs)
+    if fields.is_empty() {
+        return quote! {};
+    }
 
     let constraint_name_doc = format!("Unique constraint: {}", constraint.name);
     quote! {
@@ -117,6 +145,113 @@ fn generate_unique_constraint_struct(
         #[derive(Debug, Clone, PartialEq)]
         pub struct #struct_name {
             #(#fields,)*
+        }
+    }
+}
+
+fn generate_unique_constraint_enum(
+    unique_constraints: &[UniqueConstraint],
+    model_name: &str,
+) -> TokenStream {
+    // Only generate if we have constraints
+    if unique_constraints.is_empty() {
+        return quote! {};
+    }
+
+    // Generate enum variants for each constraint
+    let variants = unique_constraints
+        .iter()
+        .map(|constraint| {
+            let struct_name = format_unique_constraint_struct_name(model_name, &constraint.name);
+            let variant_name = format_ident!("{}Constraint", constraint.name.to_upper_camel_case());
+            quote! {
+                #variant_name(&#struct_name)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let enum_doc = format!("Unique constraints for {} model", model_name);
+    quote! {
+        #[doc = #enum_doc]
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum UniqueConstraint<'a> {
+            #(#variants,)*
+        }
+    }
+}
+
+fn generate_entity_ext_trait(
+    unique_constraints: &[UniqueConstraint],
+    model: &Model,
+) -> TokenStream {
+    // Only generate if we have constraints
+    if unique_constraints.is_empty() {
+        return quote! {};
+    }
+
+    // Generate match arms for each constraint
+    let match_arms = unique_constraints
+        .iter()
+        .map(|constraint| {
+            let variant_name = format_ident!("{}Constraint", constraint.name.to_upper_camel_case());
+
+            // Generate conditions for each field in the constraint
+            let conditions = constraint
+                .fields
+                .iter()
+                .filter_map(|field_name| {
+                    model
+                        .fields
+                        .iter()
+                        .find(|f| f.name == *field_name)
+                        .map(|field| {
+                            let column_name = format_ident!("{}", field.name.to_upper_camel_case());
+                            let field_ident = format_ident!(
+                                "{}",
+                                escape_rust_keyword(&field.name.to_snake_case())
+                            );
+                            quote! {
+                                Column::#column_name.eq(&c.#field_ident)
+                            }
+                        })
+                })
+                .collect::<Vec<_>>();
+
+            // Handle single field vs multi-field constraints
+            let filter_expr = if conditions.len() == 1 {
+                let condition = &conditions[0];
+                quote! {
+                    Entity::find().filter(#condition)
+                }
+            } else {
+                quote! {
+                    Entity::find().filter(
+                        Condition::all()
+                            #(.add(#conditions))*
+                    )
+                }
+            };
+
+            quote! {
+                UniqueConstraint::#variant_name(c) => {
+                    #filter_expr
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    quote! {
+        /// Extension trait for Entity providing find_unique functionality
+        pub trait EntityExt {
+            fn find_unique(constraint: UniqueConstraint) -> Select<Entity>;
+        }
+
+        impl EntityExt for Entity {
+            fn find_unique(constraint: UniqueConstraint) -> Select<Entity> {
+                match constraint {
+                    #(#match_arms)*
+                }
+            }
         }
     }
 }
@@ -186,6 +321,8 @@ pub struct ModelCodegen {
     pub use_declarations: Vec<TokenStream>,
     pub model: TokenStream,
     pub unique_constraint_structs: Vec<TokenStream>,
+    pub unique_constraint_enum: TokenStream,
+    pub entity_ext_trait: TokenStream,
 }
 
 fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> ModelCodegen {
@@ -203,12 +340,19 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
             .collect::<Vec<_>>(),
     );
 
-    // Generate unique constraint structs (only for compound constraints)
+    // Generate unique constraint structs (for all constraints)
     let unique_constraint_structs = unique_constraints
         .iter()
-        .filter(|c| c.fields.len() > 1)
         .map(|c| generate_unique_constraint_struct(c, prisma_dmmf_model, &prisma_dmmf_model.name))
+        .filter(|ts| !ts.is_empty()) // Filter out empty token streams
         .collect::<Vec<_>>();
+
+    // Generate unique constraint enum (only if we have constraints)
+    let unique_constraint_enum =
+        generate_unique_constraint_enum(&unique_constraints, &prisma_dmmf_model.name);
+
+    // Generate EntityExt trait (only if we have constraints)
+    let entity_ext_trait = generate_entity_ext_trait(&unique_constraints, prisma_dmmf_model);
 
     let table_name = prisma_table_name(prisma_dmmf_model);
     let model_doc = prisma_dmmf_model
@@ -419,6 +563,8 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
           }
         },
         unique_constraint_structs,
+        unique_constraint_enum,
+        entity_ext_trait,
     }
 }
 
@@ -714,6 +860,8 @@ pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -
             let use_declarations = &model_codegen.use_declarations;
             let model = &model_codegen.model;
             let unique_constraint_structs = &model_codegen.unique_constraint_structs;
+            let unique_constraint_enum = &model_codegen.unique_constraint_enum;
+            let entity_ext_trait = &model_codegen.entity_ext_trait;
             let relation_enum = &model_entity_relations.relation_enum;
             let related_entity_impls = &model_entity_relations.related_entity_impls;
 
@@ -722,6 +870,7 @@ pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -
                     #![allow(unused)]
 
                     use sea_orm::entity::prelude::*;
+                    use sea_orm::query::*;
 
                     #(
                         #use_declarations
@@ -732,6 +881,10 @@ pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -
                     #(
                         #unique_constraint_structs
                     )*
+
+                    #unique_constraint_enum
+
+                    #entity_ext_trait
 
                     #relation_enum
 
