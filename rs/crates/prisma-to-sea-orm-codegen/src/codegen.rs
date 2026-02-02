@@ -122,8 +122,20 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
         .iter()
         .map(|f| prisma_field_type(f))
         .collect::<Vec<_>>();
-    let model_fields_have_primary_key = model_fields.iter().any(|f| f.is_id);
-    let attributes = model_fields.iter().enumerate().map(|(f_index, f)| {
+    let model_primary_keys = prisma_dmmf_model
+        .primary_key
+        .as_ref()
+        .map(|pk| pk.fields.clone())
+        .unwrap_or_default();
+    let has_primary_key =
+        !model_primary_keys.is_empty() || prisma_dmmf_model.fields.iter().any(|f| f.is_id);
+    if !has_primary_key {
+        panic!(
+            "Model '{}' does not have a primary key",
+            prisma_dmmf_model.name
+        );
+    }
+    let attributes = model_fields.iter().map(|f| {
     let prisma_dmmf_indexes_for_field = prisma_dmmf_indexes_for_model.iter().filter(|i| {
       i.fields.iter().any(|r#if| r#if.name == f.name)
     }).collect::<Vec<_>>();
@@ -160,7 +172,7 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
       }
     }
 
-    let mut primary_key = f.is_id;
+    let mut primary_key = model_primary_keys.contains(&f.name) || f.is_id;
     let mut indexed = false;
     let mut unique = false;
     let mut unique_keys = IndexSet::new();
@@ -184,14 +196,7 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
       }
     }
 
-    // NB: SeaORM requires a primary key 🤷 if none exists, just make each column a part of a
-    // composite primary key.
-    // https://github.com/SeaQL/sea-orm/issues/485
-    if (model_fields_have_primary_key && primary_key) || (
-      // NB: 12 is the SeaORM imposed max composite primary key size, and primary keys cannot use
-      // optional columns
-      !model_fields_have_primary_key && f_index < 12 && f.is_required
-    ) {
+    if primary_key {
       attrs.push(quote! { primary_key });
       attrs.push(quote! { auto_increment = false });
     }
