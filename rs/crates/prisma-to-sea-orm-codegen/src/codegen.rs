@@ -406,7 +406,11 @@ pub struct ModelCodegen {
     pub entity_ext_trait: TokenStream,
 }
 
-fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> ModelCodegen {
+fn prisma_model(
+    schema_name: impl AsRef<str>,
+    prisma_dmmf_model: &Model,
+    prisma_dmmf_indexes: &[Index],
+) -> ModelCodegen {
     let prisma_dmmf_indexes_for_model = prisma_dmmf_indexes
         .iter()
         .filter(|i| i.model == prisma_dmmf_model.name)
@@ -622,12 +626,13 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
     }
   }).collect::<Vec<_>>();
 
+    let schema_name = schema_name.as_ref();
     ModelCodegen {
         use_declarations: enum_use_declarations,
         model: quote! {
           #model_doc
           #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-          #[sea_orm(table_name = #table_name)]
+          #[sea_orm(table_name = #table_name, schema_name = #schema_name)]
           pub struct Model {
             #(
               #attributes
@@ -908,7 +913,11 @@ fn prelude(prisma_dmmf_models: &[Model]) -> TokenStream {
     }
 }
 
-pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -> TokenStream {
+pub fn module(
+    prisma_dmmf_datamodel: &Datamodel,
+    module_name: impl AsRef<str>,
+    schema_name: impl AsRef<str>,
+) -> TokenStream {
     let module_ident = format_ident!("{}", module_name.as_ref());
     let prelude_ts = prelude(&prisma_dmmf_datamodel.models);
     let enums = prisma_dmmf_datamodel
@@ -926,7 +935,8 @@ pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -
         .iter()
         .zip(module_names)
         .map(|(m, module_name)| {
-            let model_codegen = prisma_model(m, &prisma_dmmf_datamodel.indexes);
+            let model_codegen =
+                prisma_model(schema_name.as_ref(), m, &prisma_dmmf_datamodel.indexes);
             let model_entity_relations: ModelEntityRelations = prisma_model_relations(m);
 
             let ModelCodegen {
