@@ -6,12 +6,13 @@ pub mod prisma_dmmf;
 pub fn prisma_to_sea_orm_codegen(
     prisma_dmmf_datamodel: prisma_dmmf::Datamodel,
     module_name: impl AsRef<str>,
+    schema_name: impl AsRef<str>,
 ) -> anyhow::Result<String> {
     if !prisma_dmmf_datamodel.types.is_empty() {
         return Err(anyhow::anyhow!("Prisma composite types are unsupported."));
     }
 
-    let tokens = codegen::module(&prisma_dmmf_datamodel, module_name);
+    let tokens = codegen::module(&prisma_dmmf_datamodel, module_name, schema_name);
     let item: syn::Item = syn::parse2(tokens)?;
     let file = syn::File {
         shebang: None,
