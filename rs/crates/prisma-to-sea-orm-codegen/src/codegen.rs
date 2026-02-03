@@ -12,6 +12,12 @@ pub struct UniqueConstraint {
     pub fields: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NonUniqueIndex {
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
 pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet<UniqueConstraint> {
     let primary_key_constraints = model
         .primary_key
@@ -74,6 +80,37 @@ pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet
         .collect()
 }
 
+pub fn collect_non_unique_indexes(model: &Model, indexes: &[&Index]) -> IndexSet<NonUniqueIndex> {
+    let normal_indexes = indexes
+        .iter()
+        .filter(|idx| idx.model == model.name && matches!(idx.r#type, IndexType::Normal))
+        .filter(|idx| !idx.fields.is_empty())
+        .map(|idx| {
+            let index_name = idx
+                .db_name
+                .clone()
+                .or_else(|| idx.name.clone())
+                .unwrap_or_else(|| {
+                    idx.fields
+                        .iter()
+                        .map(|f| f.name.clone())
+                        .collect::<Vec<_>>()
+                        .join("_")
+                });
+            let field_names = idx
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .collect::<Vec<_>>();
+            NonUniqueIndex {
+                name: index_name,
+                fields: field_names,
+            }
+        });
+
+    normal_indexes.collect()
+}
+
 fn generate_unique_constraint_enum(
     unique_constraints: &IndexSet<UniqueConstraint>,
     model: &Model,
@@ -130,15 +167,72 @@ fn generate_unique_constraint_enum(
     }
 }
 
-fn generate_entity_ext_trait(
-    unique_constraints: &IndexSet<UniqueConstraint>,
+fn generate_non_unique_index_enum(
+    non_unique_indexes: &IndexSet<NonUniqueIndex>,
     model: &Model,
 ) -> TokenStream {
-    if unique_constraints.is_empty() {
+    if non_unique_indexes.is_empty() {
         return quote! {};
     }
 
-    let match_arms = unique_constraints
+    let variants = non_unique_indexes
+        .iter()
+        .flat_map(|index| {
+            let variant_name = format_ident!("{}Index", index.name.to_upper_camel_case());
+
+            let fields = index
+                .fields
+                .iter()
+                .filter_map(|field_name| {
+                    model
+                        .fields
+                        .iter()
+                        .find(|f| f.name == *field_name)
+                        .map(|field| {
+                            let field_ident = format_ident!(
+                                "{}",
+                                escape_rust_keyword(field.name.to_snake_case())
+                            );
+                            let field_type = prisma_field_type(field);
+                            quote! { #field_ident: #field_type }
+                        })
+                })
+                .collect::<Vec<_>>();
+
+            if fields.is_empty() {
+                return None;
+            }
+
+            Some(quote! {
+                #variant_name {
+                    #(#fields,)*
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if variants.is_empty() {
+        return quote! {};
+    }
+
+    quote! {
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum NonUniqueIndex {
+            #(#variants,)*
+        }
+    }
+}
+
+fn generate_entity_ext_trait(
+    unique_constraints: &IndexSet<UniqueConstraint>,
+    non_unique_indexes: &IndexSet<NonUniqueIndex>,
+    model: &Model,
+) -> TokenStream {
+    if unique_constraints.is_empty() && non_unique_indexes.is_empty() {
+        return quote! {};
+    }
+
+    let unique_match_arms = unique_constraints
         .iter()
         .map(|constraint| {
             let variant_name = format_ident!("{}Constraint", constraint.name.to_upper_camel_case());
@@ -192,7 +286,7 @@ fn generate_entity_ext_trait(
                                 (FieldType::ModelName(_), _, false)
                                     if matches!(field.kind, FieldKind::Enum) =>
                                 {
-                                    quote! { #field_ident.as_ref() }
+                                    quote! { #field_ident }
                                 }
                                 (FieldType::String, _, false) => {
                                     quote! { #field_ident.as_deref() }
@@ -229,17 +323,149 @@ fn generate_entity_ext_trait(
         })
         .collect::<Vec<_>>();
 
+    let non_unique_match_arms = non_unique_indexes
+        .iter()
+        .map(|index| {
+            let variant_name = format_ident!("{}Index", index.name.to_upper_camel_case());
+
+            let field_patterns: Vec<_> = index
+                .fields
+                .iter()
+                .filter_map(|field_name| {
+                    model
+                        .fields
+                        .iter()
+                        .find(|f| f.name == *field_name)
+                        .map(|field| {
+                            format_ident!("{}", escape_rust_keyword(field.name.to_snake_case()))
+                        })
+                })
+                .collect();
+
+            let conditions = index
+                .fields
+                .iter()
+                .filter_map(|field_name| {
+                    model
+                        .fields
+                        .iter()
+                        .find(|f| f.name == *field_name)
+                        .map(|field| {
+                            let column_name = format_ident!("{}", field.name.to_upper_camel_case());
+                            let field_ident = format_ident!(
+                                "{}",
+                                escape_rust_keyword(field.name.to_snake_case())
+                            );
+                            let field_value = match (
+                                &field.r#type,
+                                field.native_type.as_ref().map(|nt| nt.0.as_str()),
+                                field.is_required,
+                            ) {
+                                (FieldType::String, Some("Uuid"), _) => {
+                                    quote! { #field_ident }
+                                }
+                                (FieldType::Int, _, _)
+                                | (FieldType::BigInt, _, _)
+                                | (FieldType::Float, _, _)
+                                | (FieldType::Boolean, _, _)
+                                | (FieldType::DateTime, _, _) => quote! { #field_ident },
+                                (FieldType::ModelName(_), _, true)
+                                    if matches!(field.kind, FieldKind::Enum) =>
+                                {
+                                    quote! { #field_ident.clone() }
+                                }
+                                (FieldType::ModelName(_), _, false)
+                                    if matches!(field.kind, FieldKind::Enum) =>
+                                {
+                                    quote! { #field_ident }
+                                }
+                                (FieldType::String, _, false) => {
+                                    quote! { #field_ident.as_deref() }
+                                }
+                                (FieldType::String, _, true) => quote! { #field_ident.as_str() },
+                                _ => quote! { &#field_ident },
+                            };
+                            quote! {
+                                Column::#column_name.eq(#field_value)
+                            }
+                        })
+                })
+                .collect::<Vec<_>>();
+
+            let filter_expr = if conditions.len() == 1 {
+                let condition = &conditions[0];
+                quote! {
+                    Entity::find().filter(#condition)
+                }
+            } else {
+                quote! {
+                    Entity::find().filter(
+                        Condition::all()
+                            #(.add(#conditions))*
+                    )
+                }
+            };
+
+            quote! {
+                NonUniqueIndex::#variant_name { #(#field_patterns,)* } => {
+                    #filter_expr
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let trait_methods = match (unique_constraints.is_empty(), non_unique_indexes.is_empty()) {
+        (false, false) => quote! {
+            fn find_unique(constraint: UniqueConstraint) -> Select<Entity>;
+            fn find_by_index(index: NonUniqueIndex) -> Select<Entity>;
+        },
+        (false, true) => quote! {
+            fn find_unique(constraint: UniqueConstraint) -> Select<Entity>;
+        },
+        (true, false) => quote! {
+            fn find_by_index(index: NonUniqueIndex) -> Select<Entity>;
+        },
+        (true, true) => quote! {},
+    };
+
+    let trait_impl = match (unique_constraints.is_empty(), non_unique_indexes.is_empty()) {
+        (false, false) => quote! {
+            fn find_unique(constraint: UniqueConstraint) -> Select<Entity> {
+                match constraint {
+                    #(#unique_match_arms)*
+                }
+            }
+
+            fn find_by_index(index: NonUniqueIndex) -> Select<Entity> {
+                match index {
+                    #(#non_unique_match_arms)*
+                }
+            }
+        },
+        (false, true) => quote! {
+            fn find_unique(constraint: UniqueConstraint) -> Select<Entity> {
+                match constraint {
+                    #(#unique_match_arms)*
+                }
+            }
+        },
+        (true, false) => quote! {
+            fn find_by_index(index: NonUniqueIndex) -> Select<Entity> {
+                match index {
+                    #(#non_unique_match_arms)*
+                }
+            }
+        },
+        (true, true) => quote! {},
+    };
+
     quote! {
         pub trait EntityExt {
-            fn find_unique(constraint: UniqueConstraint) -> Select<Entity>;
+            #trait_methods
         }
 
         impl EntityExt for Entity {
-            fn find_unique(constraint: UniqueConstraint) -> Select<Entity> {
-                match constraint {
-                    #(#match_arms)*
-                }
-            }
+            #trait_impl
         }
     }
 }
@@ -309,6 +535,7 @@ pub struct ModelCodegen {
     pub use_declarations: Vec<TokenStream>,
     pub model: TokenStream,
     pub unique_constraint_enum: TokenStream,
+    pub non_unique_index_enum: TokenStream,
     pub entity_ext_trait: TokenStream,
 }
 
@@ -321,10 +548,16 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
     let unique_constraints =
         collect_unique_constraints(prisma_dmmf_model, &prisma_dmmf_indexes_for_model);
 
+    let non_unique_indexes =
+        collect_non_unique_indexes(prisma_dmmf_model, &prisma_dmmf_indexes_for_model);
+
     let unique_constraint_enum =
         generate_unique_constraint_enum(&unique_constraints, prisma_dmmf_model);
 
-    let entity_ext_trait = generate_entity_ext_trait(&unique_constraints, prisma_dmmf_model);
+    let non_unique_index_enum =
+        generate_non_unique_index_enum(&non_unique_indexes, prisma_dmmf_model);
+
+    let entity_ext_trait = generate_entity_ext_trait(&unique_constraints, &non_unique_indexes, prisma_dmmf_model);
 
     let table_name = prisma_table_name(prisma_dmmf_model);
     let model_doc = prisma_dmmf_model
@@ -535,6 +768,7 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
           }
         },
         unique_constraint_enum,
+        non_unique_index_enum,
         entity_ext_trait,
     }
 }
@@ -831,6 +1065,7 @@ pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -
                 use_declarations,
                 model,
                 unique_constraint_enum,
+                non_unique_index_enum,
                 entity_ext_trait,
             } = &model_codegen;
             let ModelEntityRelations {
@@ -852,6 +1087,8 @@ pub fn module(prisma_dmmf_datamodel: &Datamodel, module_name: impl AsRef<str>) -
                     #model
 
                     #unique_constraint_enum
+
+                    #non_unique_index_enum
 
                     #entity_ext_trait
 
