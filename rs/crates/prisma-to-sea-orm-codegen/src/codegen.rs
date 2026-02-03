@@ -80,12 +80,10 @@ pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet
             fields: idx.fields.clone(),
         });
 
-    let external_unique_constraints = process_external_indexes(
-        indexes,
-        model,
-        IndexType::Unique,
-        |name, fields| UniqueConstraint { name, fields },
-    );
+    let external_unique_constraints =
+        process_external_indexes(indexes, model, IndexType::Unique, |name, fields| {
+            UniqueConstraint { name, fields }
+        });
 
     primary_key_constraints
         .chain(unique_field_constraints)
@@ -95,125 +93,102 @@ pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet
 }
 
 pub fn collect_non_unique_indexes(model: &Model, indexes: &[&Index]) -> IndexSet<NonUniqueIndex> {
-    process_external_indexes(
-        indexes,
-        model,
-        IndexType::Normal,
-        |name, fields| NonUniqueIndex { name, fields },
-    )
+    process_external_indexes(indexes, model, IndexType::Normal, |name, fields| {
+        NonUniqueIndex { name, fields }
+    })
     .collect()
+}
+
+fn generate_index_enum<T>(
+    items: &IndexSet<T>,
+    model: &Model,
+    enum_name: &str,
+    variant_suffix: &str,
+    get_name: impl Fn(&T) -> &str,
+    get_fields: impl Fn(&T) -> &[String],
+) -> TokenStream
+where
+    T: std::hash::Hash + Eq,
+{
+    if items.is_empty() {
+        return quote! {};
+    }
+
+    let variants = items
+        .iter()
+        .flat_map(|item| {
+            let variant_name =
+                format_ident!("{}{}", get_name(item).to_upper_camel_case(), variant_suffix);
+
+            let fields = get_fields(item)
+                .iter()
+                .filter_map(|field_name| {
+                    model
+                        .fields
+                        .iter()
+                        .find(|f| f.name == *field_name)
+                        .map(|field| {
+                            let field_ident = format_ident!(
+                                "{}",
+                                escape_rust_keyword(field.name.to_snake_case())
+                            );
+                            let field_type = prisma_field_type(field);
+                            quote! { #field_ident: #field_type }
+                        })
+                })
+                .collect::<Vec<_>>();
+
+            if fields.is_empty() {
+                return None;
+            }
+
+            Some(quote! {
+                #variant_name {
+                    #(#fields,)*
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if variants.is_empty() {
+        return quote! {};
+    }
+
+    let enum_ident = format_ident!("{}", enum_name);
+    quote! {
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum #enum_ident {
+            #(#variants,)*
+        }
+    }
 }
 
 fn generate_unique_constraint_enum(
     unique_constraints: &IndexSet<UniqueConstraint>,
     model: &Model,
 ) -> TokenStream {
-    if unique_constraints.is_empty() {
-        return quote! {};
-    }
-
-    let variants = unique_constraints
-        .iter()
-        .flat_map(|constraint| {
-            let variant_name = format_ident!("{}Constraint", constraint.name.to_upper_camel_case());
-
-            let fields = constraint
-                .fields
-                .iter()
-                .filter_map(|field_name| {
-                    model
-                        .fields
-                        .iter()
-                        .find(|f| f.name == *field_name)
-                        .map(|field| {
-                            let field_ident = format_ident!(
-                                "{}",
-                                escape_rust_keyword(field.name.to_snake_case())
-                            );
-                            let field_type = prisma_field_type(field);
-                            quote! { #field_ident: #field_type }
-                        })
-                })
-                .collect::<Vec<_>>();
-
-            if fields.is_empty() {
-                return None;
-            }
-
-            Some(quote! {
-                #variant_name {
-                    #(#fields,)*
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    if variants.is_empty() {
-        return quote! {};
-    }
-
-    quote! {
-        #[derive(Debug, Clone, PartialEq)]
-        pub enum UniqueConstraint {
-            #(#variants,)*
-        }
-    }
+    generate_index_enum(
+        unique_constraints,
+        model,
+        "UniqueConstraint",
+        "Constraint",
+        |constraint| &constraint.name,
+        |constraint| &constraint.fields,
+    )
 }
 
 fn generate_non_unique_index_enum(
     non_unique_indexes: &IndexSet<NonUniqueIndex>,
     model: &Model,
 ) -> TokenStream {
-    if non_unique_indexes.is_empty() {
-        return quote! {};
-    }
-
-    let variants = non_unique_indexes
-        .iter()
-        .flat_map(|index| {
-            let variant_name = format_ident!("{}Index", index.name.to_upper_camel_case());
-
-            let fields = index
-                .fields
-                .iter()
-                .filter_map(|field_name| {
-                    model
-                        .fields
-                        .iter()
-                        .find(|f| f.name == *field_name)
-                        .map(|field| {
-                            let field_ident = format_ident!(
-                                "{}",
-                                escape_rust_keyword(field.name.to_snake_case())
-                            );
-                            let field_type = prisma_field_type(field);
-                            quote! { #field_ident: #field_type }
-                        })
-                })
-                .collect::<Vec<_>>();
-
-            if fields.is_empty() {
-                return None;
-            }
-
-            Some(quote! {
-                #variant_name {
-                    #(#fields,)*
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    if variants.is_empty() {
-        return quote! {};
-    }
-
-    quote! {
-        #[derive(Debug, Clone, PartialEq)]
-        pub enum NonUniqueIndex {
-            #(#variants,)*
-        }
-    }
+    generate_index_enum(
+        non_unique_indexes,
+        model,
+        "NonUniqueIndex",
+        "Index",
+        |index| &index.name,
+        |index| &index.fields,
+    )
 }
 
 fn generate_index_match_arm(
