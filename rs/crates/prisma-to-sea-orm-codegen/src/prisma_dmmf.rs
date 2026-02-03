@@ -44,7 +44,7 @@ pub struct Index {
     pub fields: Vec<IndexField>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum IndexType {
     Id,

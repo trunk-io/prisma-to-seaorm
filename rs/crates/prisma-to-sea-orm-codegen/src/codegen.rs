@@ -18,6 +18,40 @@ pub struct NonUniqueIndex {
     pub fields: Vec<String>,
 }
 
+fn get_index_name(idx: &Index) -> String {
+    idx.db_name
+        .clone()
+        .or_else(|| idx.name.clone())
+        .unwrap_or_else(|| {
+            idx.fields
+                .iter()
+                .map(|f| f.name.clone())
+                .collect::<Vec<_>>()
+                .join("_")
+        })
+}
+
+fn extract_field_names(idx: &Index) -> Vec<String> {
+    idx.fields.iter().map(|f| f.name.clone()).collect()
+}
+
+fn process_external_indexes<'a, T>(
+    indexes: &'a [&'a Index],
+    model: &'a Model,
+    index_type: IndexType,
+    create_item: impl Fn(String, Vec<String>) -> T + 'a,
+) -> impl Iterator<Item = T> + 'a {
+    indexes
+        .iter()
+        .filter(move |idx| idx.model == model.name && idx.r#type == index_type)
+        .filter(|idx| !idx.fields.is_empty())
+        .map(move |idx| {
+            let name = get_index_name(idx);
+            let fields = extract_field_names(idx);
+            create_item(name, fields)
+        })
+}
+
 pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet<UniqueConstraint> {
     let primary_key_constraints = model
         .primary_key
@@ -46,32 +80,12 @@ pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet
             fields: idx.fields.clone(),
         });
 
-    let external_unique_constraints = indexes
-        .iter()
-        .filter(|idx| idx.model == model.name && matches!(idx.r#type, IndexType::Unique))
-        .filter(|idx| !idx.fields.is_empty())
-        .map(|idx| {
-            let constraint_name = idx
-                .db_name
-                .clone()
-                .or_else(|| idx.name.clone())
-                .unwrap_or_else(|| {
-                    idx.fields
-                        .iter()
-                        .map(|f| f.name.clone())
-                        .collect::<Vec<_>>()
-                        .join("_")
-                });
-            let field_names = idx
-                .fields
-                .iter()
-                .map(|f| f.name.clone())
-                .collect::<Vec<_>>();
-            UniqueConstraint {
-                name: constraint_name,
-                fields: field_names,
-            }
-        });
+    let external_unique_constraints = process_external_indexes(
+        indexes,
+        model,
+        IndexType::Unique,
+        |name, fields| UniqueConstraint { name, fields },
+    );
 
     primary_key_constraints
         .chain(unique_field_constraints)
@@ -81,34 +95,13 @@ pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet
 }
 
 pub fn collect_non_unique_indexes(model: &Model, indexes: &[&Index]) -> IndexSet<NonUniqueIndex> {
-    let normal_indexes = indexes
-        .iter()
-        .filter(|idx| idx.model == model.name && matches!(idx.r#type, IndexType::Normal))
-        .filter(|idx| !idx.fields.is_empty())
-        .map(|idx| {
-            let index_name = idx
-                .db_name
-                .clone()
-                .or_else(|| idx.name.clone())
-                .unwrap_or_else(|| {
-                    idx.fields
-                        .iter()
-                        .map(|f| f.name.clone())
-                        .collect::<Vec<_>>()
-                        .join("_")
-                });
-            let field_names = idx
-                .fields
-                .iter()
-                .map(|f| f.name.clone())
-                .collect::<Vec<_>>();
-            NonUniqueIndex {
-                name: index_name,
-                fields: field_names,
-            }
-        });
-
-    normal_indexes.collect()
+    process_external_indexes(
+        indexes,
+        model,
+        IndexType::Normal,
+        |name, fields| NonUniqueIndex { name, fields },
+    )
+    .collect()
 }
 
 fn generate_unique_constraint_enum(
