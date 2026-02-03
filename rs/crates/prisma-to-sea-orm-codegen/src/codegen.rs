@@ -299,43 +299,29 @@ fn generate_entity_ext_trait(
         })
         .collect::<Vec<_>>();
 
-    let trait_methods = match (unique_constraints.is_empty(), non_unique_indexes.is_empty()) {
+    let impl_methods = match (unique_constraints.is_empty(), non_unique_indexes.is_empty()) {
         (false, false) => quote! {
-            fn find_unique(constraint: UniqueConstraint) -> Select<Entity>;
-            fn find_by_index(index: NonUniqueIndex) -> Select<Entity>;
-        },
-        (false, true) => quote! {
-            fn find_unique(constraint: UniqueConstraint) -> Select<Entity>;
-        },
-        (true, false) => quote! {
-            fn find_by_index(index: NonUniqueIndex) -> Select<Entity>;
-        },
-        (true, true) => quote! {},
-    };
-
-    let trait_impl = match (unique_constraints.is_empty(), non_unique_indexes.is_empty()) {
-        (false, false) => quote! {
-            fn find_unique(constraint: UniqueConstraint) -> Select<Entity> {
+            pub fn find_unique(constraint: UniqueConstraint) -> Select<Entity> {
                 match constraint {
                     #(#unique_match_arms)*
                 }
             }
 
-            fn find_by_index(index: NonUniqueIndex) -> Select<Entity> {
+            pub fn find_by_index(index: NonUniqueIndex) -> Select<Entity> {
                 match index {
                     #(#non_unique_match_arms)*
                 }
             }
         },
         (false, true) => quote! {
-            fn find_unique(constraint: UniqueConstraint) -> Select<Entity> {
+            pub fn find_unique(constraint: UniqueConstraint) -> Select<Entity> {
                 match constraint {
                     #(#unique_match_arms)*
                 }
             }
         },
         (true, false) => quote! {
-            fn find_by_index(index: NonUniqueIndex) -> Select<Entity> {
+            pub fn find_by_index(index: NonUniqueIndex) -> Select<Entity> {
                 match index {
                     #(#non_unique_match_arms)*
                 }
@@ -345,12 +331,8 @@ fn generate_entity_ext_trait(
     };
 
     quote! {
-        pub trait EntityExt {
-            #trait_methods
-        }
-
-        impl EntityExt for Entity {
-            #trait_impl
+        impl Entity {
+            #impl_methods
         }
     }
 }
