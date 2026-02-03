@@ -223,6 +223,92 @@ fn generate_non_unique_index_enum(
     }
 }
 
+fn generate_index_match_arm(
+    fields: &[String],
+    variant_name: &Ident,
+    variant_prefix: &str,
+    model: &Model,
+) -> TokenStream {
+    let field_patterns: Vec<_> = fields
+        .iter()
+        .filter_map(|field_name| {
+            model
+                .fields
+                .iter()
+                .find(|f| f.name == *field_name)
+                .map(|field| format_ident!("{}", escape_rust_keyword(field.name.to_snake_case())))
+        })
+        .collect();
+
+    let conditions = fields
+        .iter()
+        .filter_map(|field_name| {
+            model
+                .fields
+                .iter()
+                .find(|f| f.name == *field_name)
+                .map(|field| {
+                    let column_name = format_ident!("{}", field.name.to_upper_camel_case());
+                    let field_ident =
+                        format_ident!("{}", escape_rust_keyword(field.name.to_snake_case()));
+                    let field_value = match (
+                        &field.r#type,
+                        field.native_type.as_ref().map(|nt| nt.0.as_str()),
+                        field.is_required,
+                    ) {
+                        (FieldType::String, Some("Uuid"), _) => {
+                            quote! { #field_ident }
+                        }
+                        (FieldType::Int, _, _)
+                        | (FieldType::BigInt, _, _)
+                        | (FieldType::Float, _, _)
+                        | (FieldType::Boolean, _, _)
+                        | (FieldType::DateTime, _, _) => quote! { #field_ident },
+                        (FieldType::ModelName(_), _, true)
+                            if matches!(field.kind, FieldKind::Enum) =>
+                        {
+                            quote! { #field_ident.clone() }
+                        }
+                        (FieldType::ModelName(_), _, false)
+                            if matches!(field.kind, FieldKind::Enum) =>
+                        {
+                            quote! { #field_ident }
+                        }
+                        (FieldType::String, _, false) => {
+                            quote! { #field_ident.as_deref() }
+                        }
+                        (FieldType::String, _, true) => quote! { #field_ident.as_str() },
+                        _ => quote! { &#field_ident },
+                    };
+                    quote! {
+                        Column::#column_name.eq(#field_value)
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
+
+    let filter_expr = if conditions.len() == 1 {
+        let condition = &conditions[0];
+        quote! {
+            Entity::find().filter(#condition)
+        }
+    } else {
+        quote! {
+            Entity::find().filter(
+                Condition::all()
+                    #(.add(#conditions))*
+            )
+        }
+    };
+
+    let variant_path = format_ident!("{}", variant_prefix);
+    quote! {
+        #variant_path::#variant_name { #(#field_patterns,)* } => {
+            #filter_expr
+        },
+    }
+}
+
 fn generate_entity_ext_trait(
     unique_constraints: &IndexSet<UniqueConstraint>,
     non_unique_indexes: &IndexSet<NonUniqueIndex>,
@@ -236,90 +322,7 @@ fn generate_entity_ext_trait(
         .iter()
         .map(|constraint| {
             let variant_name = format_ident!("{}Constraint", constraint.name.to_upper_camel_case());
-
-            let field_patterns: Vec<_> = constraint
-                .fields
-                .iter()
-                .filter_map(|field_name| {
-                    model
-                        .fields
-                        .iter()
-                        .find(|f| f.name == *field_name)
-                        .map(|field| {
-                            format_ident!("{}", escape_rust_keyword(field.name.to_snake_case()))
-                        })
-                })
-                .collect();
-
-            let conditions = constraint
-                .fields
-                .iter()
-                .filter_map(|field_name| {
-                    model
-                        .fields
-                        .iter()
-                        .find(|f| f.name == *field_name)
-                        .map(|field| {
-                            let column_name = format_ident!("{}", field.name.to_upper_camel_case());
-                            let field_ident = format_ident!(
-                                "{}",
-                                escape_rust_keyword(field.name.to_snake_case())
-                            );
-                            let field_value = match (
-                                &field.r#type,
-                                field.native_type.as_ref().map(|nt| nt.0.as_str()),
-                                field.is_required,
-                            ) {
-                                (FieldType::String, Some("Uuid"), _) => {
-                                    quote! { #field_ident }
-                                }
-                                (FieldType::Int, _, _)
-                                | (FieldType::BigInt, _, _)
-                                | (FieldType::Float, _, _)
-                                | (FieldType::Boolean, _, _)
-                                | (FieldType::DateTime, _, _) => quote! { #field_ident },
-                                (FieldType::ModelName(_), _, true)
-                                    if matches!(field.kind, FieldKind::Enum) =>
-                                {
-                                    quote! { #field_ident.clone() }
-                                }
-                                (FieldType::ModelName(_), _, false)
-                                    if matches!(field.kind, FieldKind::Enum) =>
-                                {
-                                    quote! { #field_ident }
-                                }
-                                (FieldType::String, _, false) => {
-                                    quote! { #field_ident.as_deref() }
-                                }
-                                (FieldType::String, _, true) => quote! { #field_ident.as_str() },
-                                _ => quote! { &#field_ident },
-                            };
-                            quote! {
-                                Column::#column_name.eq(#field_value)
-                            }
-                        })
-                })
-                .collect::<Vec<_>>();
-
-            let filter_expr = if conditions.len() == 1 {
-                let condition = &conditions[0];
-                quote! {
-                    Entity::find().filter(#condition)
-                }
-            } else {
-                quote! {
-                    Entity::find().filter(
-                        Condition::all()
-                            #(.add(#conditions))*
-                    )
-                }
-            };
-
-            quote! {
-                UniqueConstraint::#variant_name { #(#field_patterns,)* } => {
-                    #filter_expr
-                },
-            }
+            generate_index_match_arm(&constraint.fields, &variant_name, "UniqueConstraint", model)
         })
         .collect::<Vec<_>>();
 
@@ -327,90 +330,7 @@ fn generate_entity_ext_trait(
         .iter()
         .map(|index| {
             let variant_name = format_ident!("{}Index", index.name.to_upper_camel_case());
-
-            let field_patterns: Vec<_> = index
-                .fields
-                .iter()
-                .filter_map(|field_name| {
-                    model
-                        .fields
-                        .iter()
-                        .find(|f| f.name == *field_name)
-                        .map(|field| {
-                            format_ident!("{}", escape_rust_keyword(field.name.to_snake_case()))
-                        })
-                })
-                .collect();
-
-            let conditions = index
-                .fields
-                .iter()
-                .filter_map(|field_name| {
-                    model
-                        .fields
-                        .iter()
-                        .find(|f| f.name == *field_name)
-                        .map(|field| {
-                            let column_name = format_ident!("{}", field.name.to_upper_camel_case());
-                            let field_ident = format_ident!(
-                                "{}",
-                                escape_rust_keyword(field.name.to_snake_case())
-                            );
-                            let field_value = match (
-                                &field.r#type,
-                                field.native_type.as_ref().map(|nt| nt.0.as_str()),
-                                field.is_required,
-                            ) {
-                                (FieldType::String, Some("Uuid"), _) => {
-                                    quote! { #field_ident }
-                                }
-                                (FieldType::Int, _, _)
-                                | (FieldType::BigInt, _, _)
-                                | (FieldType::Float, _, _)
-                                | (FieldType::Boolean, _, _)
-                                | (FieldType::DateTime, _, _) => quote! { #field_ident },
-                                (FieldType::ModelName(_), _, true)
-                                    if matches!(field.kind, FieldKind::Enum) =>
-                                {
-                                    quote! { #field_ident.clone() }
-                                }
-                                (FieldType::ModelName(_), _, false)
-                                    if matches!(field.kind, FieldKind::Enum) =>
-                                {
-                                    quote! { #field_ident }
-                                }
-                                (FieldType::String, _, false) => {
-                                    quote! { #field_ident.as_deref() }
-                                }
-                                (FieldType::String, _, true) => quote! { #field_ident.as_str() },
-                                _ => quote! { &#field_ident },
-                            };
-                            quote! {
-                                Column::#column_name.eq(#field_value)
-                            }
-                        })
-                })
-                .collect::<Vec<_>>();
-
-            let filter_expr = if conditions.len() == 1 {
-                let condition = &conditions[0];
-                quote! {
-                    Entity::find().filter(#condition)
-                }
-            } else {
-                quote! {
-                    Entity::find().filter(
-                        Condition::all()
-                            #(.add(#conditions))*
-                    )
-                }
-            };
-
-            quote! {
-                NonUniqueIndex::#variant_name { #(#field_patterns,)* } => {
-                    #filter_expr
-                },
-            }
+            generate_index_match_arm(&index.fields, &variant_name, "NonUniqueIndex", model)
         })
         .collect::<Vec<_>>();
 
@@ -557,7 +477,8 @@ fn prisma_model(prisma_dmmf_model: &Model, prisma_dmmf_indexes: &[Index]) -> Mod
     let non_unique_index_enum =
         generate_non_unique_index_enum(&non_unique_indexes, prisma_dmmf_model);
 
-    let entity_ext_trait = generate_entity_ext_trait(&unique_constraints, &non_unique_indexes, prisma_dmmf_model);
+    let entity_ext_trait =
+        generate_entity_ext_trait(&unique_constraints, &non_unique_indexes, prisma_dmmf_model);
 
     let table_name = prisma_table_name(prisma_dmmf_model);
     let model_doc = prisma_dmmf_model
