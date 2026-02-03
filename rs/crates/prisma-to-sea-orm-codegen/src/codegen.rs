@@ -35,12 +35,11 @@ fn extract_field_names(idx: &Index) -> Vec<String> {
     idx.fields.iter().map(|f| f.name.clone()).collect()
 }
 
-fn process_external_indexes<'a, T>(
-    indexes: &'a [&'a Index],
-    model: &'a Model,
+fn process_external_indexes(
+    indexes: &[&Index],
+    model: &Model,
     index_type: IndexType,
-    create_item: impl Fn(String, Vec<String>) -> T + 'a,
-) -> impl Iterator<Item = T> + 'a {
+) -> impl Iterator<Item = (String, Vec<String>)> {
     indexes
         .iter()
         .filter(move |idx| idx.model == model.name && idx.r#type == index_type)
@@ -48,7 +47,7 @@ fn process_external_indexes<'a, T>(
         .map(move |idx| {
             let name = get_index_name(idx);
             let fields = extract_field_names(idx);
-            create_item(name, fields)
+            (name, fields)
         })
 }
 
@@ -80,10 +79,9 @@ pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet
             fields: idx.fields.clone(),
         });
 
-    let external_unique_constraints =
-        process_external_indexes(indexes, model, IndexType::Unique, |name, fields| {
-            UniqueConstraint { name, fields }
-        });
+    let external_unique_constraints = process_external_indexes(indexes, model, IndexType::Unique)
+        .map(|(name, fields)| UniqueConstraint { name, fields })
+        .collect::<IndexSet<_>>();
 
     primary_key_constraints
         .chain(unique_field_constraints)
@@ -93,10 +91,9 @@ pub fn collect_unique_constraints(model: &Model, indexes: &[&Index]) -> IndexSet
 }
 
 pub fn collect_non_unique_indexes(model: &Model, indexes: &[&Index]) -> IndexSet<NonUniqueIndex> {
-    process_external_indexes(indexes, model, IndexType::Normal, |name, fields| {
-        NonUniqueIndex { name, fields }
-    })
-    .collect()
+    process_external_indexes(indexes, model, IndexType::Normal)
+        .map(|(name, fields)| NonUniqueIndex { name, fields })
+        .collect::<IndexSet<_>>()
 }
 
 fn generate_index_enum<T>(
