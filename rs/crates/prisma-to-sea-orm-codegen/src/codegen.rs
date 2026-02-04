@@ -337,12 +337,22 @@ fn generate_entity_ext_trait(
     }
 }
 
-fn prisma_enum(prisma_dmmf_datamodel_enum: &DatamodelEnum) -> TokenStream {
-    let enum_name = &prisma_dmmf_datamodel_enum
-        .db_name
-        .as_ref()
-        .unwrap_or(&prisma_dmmf_datamodel_enum.name)
-        .to_string();
+fn prisma_enum(
+    prisma_dmmf_datamodel_enum: &DatamodelEnum,
+    schema_name: impl AsRef<str>,
+) -> TokenStream {
+    if schema_name.as_ref().is_empty() {
+        panic!("Schema name is empty");
+    }
+
+    let enum_name = format!(
+        r#"{}"."{}"#,
+        schema_name.as_ref(),
+        &prisma_dmmf_datamodel_enum
+            .db_name
+            .as_ref()
+            .unwrap_or(&prisma_dmmf_datamodel_enum.name),
+    );
     let enum_iden = prisma_enum_iden(&prisma_dmmf_datamodel_enum.name);
     let enum_doc = prisma_dmmf_datamodel_enum
         .documentation
@@ -923,7 +933,7 @@ pub fn module(
     let enums = prisma_dmmf_datamodel
         .enums
         .iter()
-        .map(prisma_enum)
+        .map(|e| prisma_enum(e, schema_name.as_ref()))
         .collect::<Vec<_>>();
     let module_names = prisma_dmmf_datamodel
         .models
