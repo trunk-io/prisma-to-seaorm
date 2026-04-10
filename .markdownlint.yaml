@@ -1,0 +1,11 @@
+# Markdownlint configuration
+# https://github.com/DavidAnson/markdownlint
+
+# Disable line length rule - not practical for README files
+MD013: false
+
+# Allow inline HTML for <details> and <summary> elements
+MD033:
+  allowed_elements:
+    - details
+    - summary
