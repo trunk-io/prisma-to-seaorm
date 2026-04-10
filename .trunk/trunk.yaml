@@ -1,0 +1,75 @@
+# This file controls the behavior of Trunk: https://docs.trunk.io/cli
+# To learn more about the format of this file, see
+# https://docs.trunk.io/reference/trunk-yaml
+---
+version: 0.1
+cli:
+  version: 1.24.0
+
+plugins:
+  sources:
+    - id: trunk
+      ref: v1.7.6
+      uri: https://github.com/trunk-io/plugins
+
+runtimes:
+  enabled:
+    - node@22.21.1
+    - python@3.10.8
+
+lint:
+  enabled:
+    - clippy@SYSTEM
+    - cargo-fmt@SYSTEM
+    - eslint@9.29.0
+    - prettier@3.6.1
+    - prisma@6.10.1
+    - taplo@0.9.3
+    - actionlint@1.7.7
+    - git-diff-check
+    - yamllint@1.37.1
+  definitions:
+    - name: clippy
+      commands:
+        - name: lint
+          # yamllint disable-line rule:line-length
+          run: cargo clippy --message-format json --locked --all-targets --all-features -- --cap-lints=warn --no-deps
+          run_when: [cli]
+          run_from: ${root_or_parent_with_regex(Cargo.lock)}
+    - name: cargo-fmt
+      commands:
+        - name: format
+          run: cargo fmt
+          run_when: [cli]
+          files: [rust]
+          run_from: ${root_or_parent_with_regex(Cargo.lock)}
+          output: rewrite
+          batch: true
+          in_place: true
+          formatter: true
+          cache_results: false
+          sandbox_type: copy_targets
+          success_codes: [0, 1]
+    - name: eslint
+      direct_configs:
+        - eslint.config.js
+        - eslint.config.mjs
+      commands:
+        - name: lint
+          # yamllint disable-line rule:line-length
+          run: ${workspace}/js/node_modules/.bin/eslint --output-file ${tmpfile} --format json ${target}
+          run_from: ${root_or_parent_with_regex(eslint.config..+)}
+  ignore:
+    - linters: [ALL]
+      paths:
+        - "**/node_modules/**"
+        - "**/pnpm-lock.yaml"
+        - "**/Cargo.lock"
+        - rs/crates/example/schema.json
+
+actions:
+  enabled:
+    - trunk-announce
+    - trunk-check-pre-push
+    - trunk-fmt-pre-commit
+    - trunk-upgrade-available
