@@ -22,6 +22,7 @@ lint:
     - clippy@SYSTEM
     - cargo-fmt@SYSTEM
     - eslint@9.29.0
+    - markdownlint@0.45.0
     - prettier@3.6.1
     - prisma@6.10.1
     - taplo@0.9.3
@@ -33,7 +34,9 @@ lint:
       commands:
         - name: lint
           # yamllint disable-line rule:line-length
-          run: cargo clippy --message-format json --locked --all-targets --all-features -- --cap-lints=warn --no-deps
+          run:
+            cargo clippy --message-format json --locked --all-targets
+            --all-features -- --cap-lints=warn --no-deps
           run_when: [cli]
           run_from: ${root_or_parent_with_regex(Cargo.lock)}
     - name: cargo-fmt
@@ -57,7 +60,9 @@ lint:
       commands:
         - name: lint
           # yamllint disable-line rule:line-length
-          run: ${workspace}/js/node_modules/.bin/eslint --output-file ${tmpfile} --format json ${target}
+          run:
+            ${workspace}/js/node_modules/.bin/eslint --output-file ${tmpfile}
+            --format json ${target}
           run_from: ${root_or_parent_with_regex(eslint.config..+)}
   ignore:
     - linters: [ALL]
