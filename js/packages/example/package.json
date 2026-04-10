@@ -1,0 +1,14 @@
+{
+  "name": "example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "prisma generate --schema schema.prisma --generator json"
+  },
+  "dependencies": {
+    "@trunkio/prisma-json-generator": "workspace:*"
+  },
+  "devDependencies": {
+    "prisma": "^6.0.0"
+  }
+}
