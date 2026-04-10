@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+heck = "0.5.0"
+indexmap = "2.14.0"
+prettyplease = "0.2.37"
+proc-macro2 = "1.0.106"
+quote = "1.0.45"
+sea-orm = "1.1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+syn = "2.0.117"
+
+prisma-to-sea-orm-codegen = { path = "crates/prisma-to-sea-orm-codegen" }
