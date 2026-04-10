@@ -1,0 +1,11 @@
+{
+  "name": "@trunkio/prisma-json-generator",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "prisma-json-generator": "bin/prisma-json-generator.mjs"
+  },
+  "dependencies": {
+    "@prisma/generator-helper": "^6.0.0"
+  }
+}

@@ -1,0 +1,140 @@
+// Example Prisma schema demonstrating various features
+// for testing prisma-to-sea-orm code generation
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+generator json {
+  provider = "prisma-json-generator"
+  output   = "../../../rs/crates/example/schema.json"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Basic model with various field types
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String   @unique
+  name      String?
+  role      Role     @default(USER)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  posts    Post[]
+  comments Comment[]
+  profile  Profile?
+
+  @@map("user")
+}
+
+// One-to-one relation
+model Profile {
+  id     String  @id @default(uuid()) @db.Uuid
+  bio    String?
+  avatar String?
+  userId String  @unique @map("user_id") @db.Uuid
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("profile")
+}
+
+// One-to-many relation with various field types
+model Post {
+  id          String     @id @default(uuid()) @db.Uuid
+  title       String
+  content     String?
+  published   Boolean    @default(false)
+  viewCount   Int        @default(0) @map("view_count")
+  rating      Float?
+  authorId    String     @map("author_id") @db.Uuid
+  categoryId  String?    @map("category_id") @db.Uuid
+  status      PostStatus @default(DRAFT)
+  publishedAt DateTime?  @map("published_at") @db.Timestamptz(6)
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  author   User      @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  comments Comment[]
+  tags     Tag[]
+
+  @@index([authorId])
+  @@index([categoryId])
+  @@index([status, publishedAt])
+  @@map("post")
+}
+
+// Self-referential relation (categories with parent)
+model Category {
+  id       String  @id @default(uuid()) @db.Uuid
+  name     String
+  slug     String  @unique
+  parentId String? @map("parent_id") @db.Uuid
+
+  parent   Category?  @relation("CategoryToCategory", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryToCategory")
+  posts    Post[]
+
+  @@index([parentId])
+  @@map("category")
+}
+
+// Model with composite unique constraint
+model Comment {
+  id        String   @id @default(uuid()) @db.Uuid
+  content   String
+  postId    String   @map("post_id") @db.Uuid
+  authorId  String   @map("author_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  post   Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+  @@index([authorId])
+  @@map("comment")
+}
+
+// Many-to-many relation (implicit join table)
+model Tag {
+  id    String @id @default(uuid()) @db.Uuid
+  name  String @unique
+  color String @default("#000000")
+
+  posts Post[]
+
+  @@map("tag")
+}
+
+// Model with composite primary key
+model PostView {
+  postId   String   @map("post_id") @db.Uuid
+  userId   String   @map("user_id") @db.Uuid
+  viewedAt DateTime @default(now()) @map("viewed_at") @db.Timestamptz(6)
+  duration Int      @default(0) // seconds spent viewing
+
+  @@id([postId, userId])
+  @@map("post_view")
+}
+
+// Enums
+enum Role {
+  USER
+  ADMIN
+  MODERATOR
+
+  @@map("role")
+}
+
+enum PostStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+
+  @@map("post_status")
+}
