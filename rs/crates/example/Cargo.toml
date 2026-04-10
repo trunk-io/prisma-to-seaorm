@@ -1,0 +1,11 @@
+[package]
+name = "example"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+sea-orm = { workspace = true, features = ["postgres-array", "macros"] }
+
+[build-dependencies]
+prisma-to-sea-orm-codegen = { workspace = true }
