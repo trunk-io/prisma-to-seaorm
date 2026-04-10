@@ -1,0 +1,43 @@
+---
+name: CI
+
+# yamllint disable-line rule:truthy
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Setup Nix PATH
+        run: nix develop -c bash -c 'echo "PATH=$PATH" >> $GITHUB_ENV'
+
+      - name: Install JS dependencies
+        run: pnpm --dir js install
+
+      - name: Generate Prisma schema JSON
+        run: pnpm --dir js/packages/example run generate
+
+      - name: Check for uncommitted changes
+        run: |
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "Error: Generated files are out of date."
+            echo "Run 'pnpm --dir js/packages/example run generate'"
+            git status
+            git diff
+            exit 1
+          fi
+
+      - name: Build Rust
+        run: cargo build --manifest-path rs/Cargo.toml
+
+      - name: Trunk Check
+        uses: trunk-io/trunk-action@v1
