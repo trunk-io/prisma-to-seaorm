@@ -39,5 +39,8 @@ jobs:
       - name: Build Rust
         run: cargo build --manifest-path rs/Cargo.toml
 
+      - name: Test Rust
+        run: cargo test --manifest-path rs/Cargo.toml
+
       - name: Trunk Check
         uses: trunk-io/trunk-action@v1
