@@ -2,20 +2,49 @@ use heck::{ToSnakeCase, ToUpperCamelCase};
 use indexmap::{IndexMap, IndexSet};
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
+use std::hash::{Hash, Hasher};
 use syn::{punctuated::Punctuated, token::Comma};
 
 use crate::prisma_dmmf::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct UniqueConstraint {
     pub name: String,
     pub fields: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+impl PartialEq for UniqueConstraint {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields == other.fields
+    }
+}
+
+impl Eq for UniqueConstraint {}
+
+impl Hash for UniqueConstraint {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.fields.hash(state);
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct NonUniqueIndex {
     pub name: String,
     pub fields: Vec<String>,
+}
+
+impl PartialEq for NonUniqueIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields == other.fields
+    }
+}
+
+impl Eq for NonUniqueIndex {}
+
+impl Hash for NonUniqueIndex {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.fields.hash(state);
+    }
 }
 
 fn get_index_name(idx: &Index) -> String {
@@ -111,6 +140,7 @@ where
         return quote! {};
     }
 
+    let mut all_payload_fields_are_copy = true;
     let variants = items
         .iter()
         .flat_map(|item| {
@@ -125,6 +155,7 @@ where
                         .iter()
                         .find(|f| f.name == *field_name)
                         .map(|field| {
+                            all_payload_fields_are_copy &= field_is_copy(field);
                             let field_ident = format_ident!(
                                 "{}",
                                 escape_rust_keyword(field.name.to_snake_case())
@@ -152,8 +183,13 @@ where
     }
 
     let enum_ident = format_ident!("{}", enum_name);
+    let copy_derive = if all_payload_fields_are_copy {
+        quote! { Copy, }
+    } else {
+        quote! {}
+    };
     quote! {
-        #[derive(Debug, Clone, PartialEq)]
+        #[derive(Debug, Clone, #copy_derive PartialEq)]
         pub enum #enum_ident {
             #(#variants,)*
         }
@@ -720,6 +756,21 @@ fn prisma_field_type(prisma_dmmf_field: &Field) -> TokenStream {
     rust_type
 }
 
+fn field_is_copy(field: &Field) -> bool {
+    if field.is_list {
+        return false;
+    }
+
+    match (&field.r#type, &field.native_type) {
+        (FieldType::BigInt, _)
+        | (FieldType::Boolean, _)
+        | (FieldType::Float, _)
+        | (FieldType::Int, _) => true,
+        (FieldType::String, Some((native_db_type, _))) if native_db_type == "Uuid" => true,
+        _ => false,
+    }
+}
+
 fn escape_rust_keyword<T>(string: T) -> String
 where
     T: ToString,
@@ -1012,5 +1063,124 @@ pub fn module(
 
         #(#model_modules)*
       }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scalar_field(name: &str, field_type: FieldType) -> Field {
+        Field {
+            kind: FieldKind::Scalar,
+            name: name.to_owned(),
+            is_required: true,
+            is_list: false,
+            is_unique: false,
+            is_id: false,
+            is_read_only: false,
+            is_generated: Some(false),
+            is_updated_at: Some(false),
+            r#type: field_type,
+            native_type: None,
+            db_name: None,
+            has_default_value: false,
+            default: None,
+            relation_from_fields: None,
+            relation_to_fields: None,
+            relation_on_delete: None,
+            relation_on_update: None,
+            relation_name: None,
+            documentation: None,
+        }
+    }
+
+    fn uuid_field(name: &str) -> Field {
+        let mut field = scalar_field(name, FieldType::String);
+        field.native_type = Some(("Uuid".to_owned(), vec![]));
+        field
+    }
+
+    fn id_field(name: &str) -> Field {
+        let mut field = uuid_field(name);
+        field.is_id = true;
+        field
+    }
+
+    fn render_module(datamodel: &Datamodel) -> String {
+        let tokens = module(datamodel, "example", "public");
+        let item: syn::Item = syn::parse2(tokens).unwrap();
+        let file = syn::File {
+            shebang: None,
+            attrs: vec![],
+            items: vec![item],
+        };
+        prettyplease::unparse(&file)
+    }
+
+    #[test]
+    fn deduplicates_unique_constraints_by_field_set_and_keeps_first_name() {
+        let datamodel = Datamodel {
+            models: vec![Model {
+                name: "SandboxPort".to_owned(),
+                db_name: Some("sandbox_ports".to_owned()),
+                schema: None,
+                fields: vec![
+                    id_field("id"),
+                    uuid_field("sandboxId"),
+                    scalar_field("port", FieldType::Int),
+                ],
+                unique_fields: vec![vec!["sandboxId".to_owned(), "port".to_owned()]],
+                unique_indexes: vec![UniqueIndex {
+                    name: Some("uq_sandbox_ports_sandbox_port".to_owned()),
+                    fields: vec!["sandboxId".to_owned(), "port".to_owned()],
+                }],
+                documentation: None,
+                primary_key: None,
+                is_generated: Some(false),
+            }],
+            enums: vec![],
+            types: vec![],
+            indexes: vec![],
+        };
+
+        let rendered = render_module(&datamodel);
+
+        assert!(rendered.contains(
+            "#[derive(Debug, Clone, Copy, PartialEq)]\n        pub enum UniqueConstraint"
+        ));
+        assert!(rendered.contains("SandboxIdPortConstraint"));
+        assert!(!rendered.contains("UqSandboxPortsSandboxPortConstraint"));
+        assert_eq!(rendered.matches("SandboxIdPortConstraint").count(), 2);
+    }
+
+    #[test]
+    fn does_not_derive_copy_for_string_constraint_payloads() {
+        let datamodel = Datamodel {
+            models: vec![Model {
+                name: "User".to_owned(),
+                db_name: Some("users".to_owned()),
+                schema: None,
+                fields: vec![id_field("id"), scalar_field("email", FieldType::String)],
+                unique_fields: vec![vec!["email".to_owned()]],
+                unique_indexes: vec![],
+                documentation: None,
+                primary_key: None,
+                is_generated: Some(false),
+            }],
+            enums: vec![],
+            types: vec![],
+            indexes: vec![],
+        };
+
+        let rendered = render_module(&datamodel);
+
+        assert!(
+            rendered
+                .contains("#[derive(Debug, Clone, PartialEq)]\n        pub enum UniqueConstraint")
+        );
+        assert!(!rendered.contains(
+            "#[derive(Debug, Clone, Copy, PartialEq)]\n        pub enum UniqueConstraint"
+        ));
     }
 }
